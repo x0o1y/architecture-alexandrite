@@ -1,0 +1,57 @@
+@startuml
+title Кеширование списка заказов MES
+
+actor Оператор as operator
+boundary "MES Frontend" as frontend
+control "MES API" as api
+database "Redis" as redis
+database "MES DB" as db
+
+== Чтение списка заказов ==
+
+operator -> frontend: Открыть страницу заказов
+frontend -> api: GET /orders?status=...&page=...&size=...
+api -> db: Получить поколение статуса
+db --> api: vN
+api -> redis: Получить страницу по ключу с vN
+
+alt Ключ найден
+    redis --> api: Список заказов
+else Ключ отсутствует
+    redis --> api: Пустой результат
+    api -> db: Запросить страницу заказов
+    db --> api: Список заказов
+    api -> redis: Сохранить страницу с TTL 5 минут
+    alt Страница сохранена
+        redis --> api: Успешно
+    else Redis недоступен
+        redis --> api: Ошибка соединения
+        api -> api: Записать WARN\nУвеличить redis_cache_errors_total {operation=write}
+    end
+else Redis недоступен
+    redis --> api: Ошибка соединения
+    api -> api: Записать WARN\nУвеличить redis_cache_errors_total {operation=read}
+    api -> db: Запросить страницу заказов
+    db --> api: Список заказов
+end
+
+api --> frontend: Список заказов
+frontend --> operator: Показать список
+
+== Изменение статуса заказа ==
+
+operator -> frontend: Изменить статус
+frontend -> api: PATCH /orders/{id}/status
+api -> db: Сохранить статус и увеличить поколения\nстарого и нового статуса в одной транзакции
+alt Транзакция завершена
+    db --> api: Изменения и поколения сохранены
+    api --> frontend: Статус изменён
+    frontend --> operator: Показать результат
+else Транзакция откачена
+    db --> api: Ошибка
+    api -> api: Записать ERROR\nУвеличить order_status_transaction_errors_total
+    api --> frontend: Ошибка изменения статуса
+    frontend --> operator: Показать ошибку
+end
+
+@enduml
